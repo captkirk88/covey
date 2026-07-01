@@ -6,7 +6,7 @@ Covey is a work in progress and is not yet feature complete but can be used to c
 
 ## Why C3?
 
-It is closer to 1.0 than Zig. Has actual interfaces. Allows for more complex data structures and is more familiar to most developers coming from C. It also has a more mature ecosystem and better tooling support. It was easier to write a Bevy inspired ECS in C3 than Zig. Getting SystemParams and systems to work right is because of C3 macros. You could argue that Zig's comptime is more powerful than C3's macros, but comptime in Zig becomes more complex and harder to read when you start doing more advanced things. C3's macros are simpler and easier to read, but they are not as powerful as Zig's comptime.
+It is closer to 1.0 than Zig. Has actual interfaces. Allows for more complex data structures and is more familiar to most developers coming from C. It also has a more mature ecosystem and better tooling support (you don't need a build.zig so you can use mise or make). It was easier to write a Bevy inspired ECS in C3 than Zig. Getting SystemParams and systems to work right is because of C3 macros. You could argue that Zig's comptime is more powerful than C3's macros, but comptime in Zig becomes more complex and harder to read when you start doing more advanced things. C3's macros are simpler and easier to read, but they are not as powerful as Zig's comptime.
 
 ## Docs
 
