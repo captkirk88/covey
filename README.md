@@ -14,7 +14,7 @@ Generate docs with `c3c docgen --emit-stdlib=no`.
 
 ## Benchmarks
 
-Run benchmarks with `c3c test --benchmarking -O4`. -O4 was the most optimal on my system. Adjust as needed.
+Run benchmarks with `c3c test --benchmarking -O5`. Adjust optimization preference as needed.
 
 Results on my system are not representative of all systems. Your results may vary.
 
