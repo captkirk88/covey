@@ -1,0 +1,591 @@
+import ecs;
+import archetype;
+import world;
+import std::core::mem;
+import std::io;
+
+struct Position
+{
+	float x;
+	float y;
+}
+
+
+struct Velocity
+{
+	float dx;
+	float dy;
+}
+
+fn void test_world_basic() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	ecs::Entity e1 = w.spawn();
+	assert(w.is_alive(e1));
+
+	// Test default archetype is empty
+	assert(!world::has{Position}(&w, e1));
+	assert(!world::has{Velocity}(&w, e1));
+
+	// Add position component
+	Position pos = { .x = 10.0f, .y = 20.0f };
+	world::add{Position}(&w, e1, pos);
+	assert(world::has{Position}(&w, e1));
+	assert(!world::has{Velocity}(&w, e1));
+
+	Position* pos_ptr = world::get{Position}(&w, e1);
+	assert(pos_ptr != null);
+	assert(pos_ptr.x == 10.0f);
+	assert(pos_ptr.y == 20.0f);
+
+	// Update position component
+	pos_ptr.x = 15.0f;
+	Position* pos_ptr_updated = world::get{Position}(&w, e1);
+	assert(pos_ptr_updated.x == 15.0f);
+
+	// Add velocity component (archetype transition to Position + Velocity)
+	Velocity vel = { .dx = 1.0f, .dy = 2.0f };
+	world::add{Velocity}(&w, e1, vel);
+	assert(world::has{Position}(&w, e1));
+	assert(world::has{Velocity}(&w, e1));
+
+	// Verify both components are correct after transition
+	Position* pos_ptr2 = world::get{Position}(&w, e1);
+	Velocity* vel_ptr2 = world::get{Velocity}(&w, e1);
+	assert(pos_ptr2.x == 15.0f);
+	assert(pos_ptr2.y == 20.0f);
+	assert(vel_ptr2.dx == 1.0f);
+	assert(vel_ptr2.dy == 2.0f);
+
+	// Remove velocity component (archetype transition back to Position)
+	world::remove{Velocity}(&w, e1);
+	assert(world::has{Position}(&w, e1));
+	assert(!world::has{Velocity}(&w, e1));
+
+	Position* pos_ptr3 = world::get{Position}(&w, e1);
+	assert(pos_ptr3.x == 15.0f);
+	assert(pos_ptr3.y == 20.0f);
+
+	// Despawn entity
+	w.despawn(e1);
+	assert(!w.is_alive(e1));
+	assert(world::get{Position}(&w, e1) == null);
+}
+
+fn void test_world_entity_recycling() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	ecs::Entity e1 = w.spawn();
+	ecs::Entity e2 = w.spawn();
+
+	assert(e1.id == 0);
+	assert(e2.id == 1);
+
+	w.despawn(e1);
+	assert(!w.is_alive(e1));
+
+	// Next spawn should recycle e1's slot and increment gen
+	ecs::Entity e3 = w.spawn();
+	assert(e3.id == 0);
+	assert(e3.gen == 1);
+	assert(w.is_alive(e3));
+	assert(!w.is_alive(e1)); // e1 has old generation 0
+}
+
+fn void test_world_multiple_entities_transition() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	ecs::Entity e1 = w.spawn();
+	ecs::Entity e2 = w.spawn();
+
+	Position pos1 = { .x = 1.0f, .y = 2.0f };
+	Position pos2 = { .x = 100.0f, .y = 200.0f };
+
+	world::add{Position}(&w, e1, pos1);
+	world::add{Position}(&w, e2, pos2);
+
+	// Add velocity to e1, making it transition, but leaving e2 in Position-only archetype
+	Velocity vel1 = { .dx = 0.5f, .dy = 0.5f };
+	world::add{Velocity}(&w, e1, vel1);
+
+	Position* pos_e1 = world::get{Position}(&w, e1);
+	Position* pos_e2 = world::get{Position}(&w, e2);
+	Velocity* vel_e1 = world::get{Velocity}(&w, e1);
+
+	assert(pos_e1.x == 1.0f);
+	assert(pos_e2.x == 100.0f);
+	assert(vel_e1.dx == 0.5f);
+	assert(!world::has{Velocity}(&w, e2));
+}
+
+
+fn void test_world_query() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	ecs::Entity e1 = w.spawn();
+	ecs::Entity e2 = w.spawn();
+
+	Position pos1 = { .x = 1.0f, .y = 2.0f };
+	Position pos2 = { .x = 10.0f, .y = 20.0f };
+	Velocity vel1 = { .dx = 0.5f, .dy = 0.5f };
+
+	world::add{Position}(&w, e1, pos1);
+	world::add{Position}(&w, e2, pos2);
+	world::add{Velocity}(&w, e1, vel1);
+
+	// Let's run a query for Position and Velocity
+	var iter @safeinfer = w.query(Position, Velocity);
+	uint count = 0;
+	for (var res @safeinfer = iter.next(); res != null; res = iter.next())
+	{
+		assert(res.entity.id == e1.id);
+		assert(res.p1.x == 1.0f);
+		assert(res.p2.dx == 0.5f);
+		count++;
+	}
+	assert(count == 1);
+}
+
+struct Active { bool dummy; }
+struct Frozen { bool dummy; }
+
+
+
+fn void dummy_fn(int a, float b) {}
+
+macro void @test_macro_anon_helper($t)
+{
+	$foreach $p : $t.params:
+		io::printfn("Param 1: %s", $p.name);
+	$endforeach
+}
+
+macro void @test_macro_anon(#f)
+{
+	@test_macro_anon_helper($Typeof(#f));
+}
+
+fn void test_anon() @test
+{
+	@test_macro_anon(dummy_fn);
+}
+
+struct CompA { int val; }
+struct CompB { float val; }
+struct CompC { double val; }
+
+fn void test_world_query_entity() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	ecs::Entity e1 = w.spawn();
+	Position pos1  = { .x = 1.0f, .y = 2.0f };
+	world::add{Position}(&w, e1, pos1);
+
+	var iter @safeinfer = w.query(ecs::Entity, Position);
+	uint count = 0;
+	for (var res @safeinfer = iter.next(); res != null; res = iter.next())
+	{
+		assert(res.p1.id == e1.id);
+		assert(res.p2.x == 1.0f);
+		count++;
+	}
+	assert(count == 1);
+}
+
+struct GameConfig
+{
+	float speed;
+}
+
+struct CollisionEvent
+{
+	ecs::Entity e1;
+	ecs::Entity e2;
+}
+
+fn void movement_system_test(
+	ecs::Query{Position, Velocity, void, void, void, void, void, void} query,
+	ecs::Res{GameConfig} config
+) {
+	for (var res @safeinfer = query.next(); res != null; res = query.next())
+	{
+		res.p1.x += res.p2.dx * config.speed;
+		res.p1.y += res.p2.dy * config.speed;
+	}
+}
+
+fn void collision_system_test(
+	ecs::Query{ecs::Entity, Position, void, void, void, void, void, void} query,
+	ecs::MessageWriter{CollisionEvent} writer
+) {
+	ecs::Entity* first = null;
+	for (var res @safeinfer = query.next(); res != null; res = query.next())
+	{
+		if (first == null)
+		{
+			first = res.p1;
+		}
+		else
+		{
+			CollisionEvent ev = { *first, *res.p1 };
+			writer.send(ev);
+			break;
+		}
+	}
+}
+
+fn void collision_listener_test(
+	ecs::On{CollisionEvent} trigger,
+	ecs::MessageReader{CollisionEvent} reader,
+	ecs::ResMut{GameConfig}* config
+) {
+	for (CollisionEvent* ev = reader.read(); ev != null; ev = reader.read())
+	{
+		config.speed = 0.0f;
+	}
+}
+
+fn void test_world_systems() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	GameConfig config = { .speed = 2.0f };
+	w.add_resource(GameConfig::typeid, &config);
+
+	ecs::Entity e1 = w.spawn();
+	ecs::Entity e2 = w.spawn();
+
+	Position pos1 = { .x = 1.0f, .y = 2.0f };
+	Velocity vel1 = { .dx = 0.5f, .dy = 0.5f };
+	world::add{Position}(&w, e1, pos1);
+	world::add{Velocity}(&w, e1, vel1);
+
+	Position pos2 = { .x = 10.0f, .y = 20.0f };
+	Velocity vel2 = { .dx = 1.0f, .dy = 1.0f };
+	world::add{Position}(&w, e2, pos2);
+	world::add{Velocity}(&w, e2, vel2);
+
+	w.run_systems(&movement_system_test, &collision_system_test, &collision_listener_test);
+
+	Position* p1 = world::get{Position}(&w, e1);
+	Position* p2 = world::get{Position}(&w, e2);
+	assert(p1.x == 2.0f);
+	assert(p2.x == 12.0f);
+	GameConfig* game_config = (GameConfig*)w.get_resource(GameConfig::typeid);
+	assert(game_config != null);
+	assert(game_config.speed == 0.0f);
+}
+
+fn void test_world_query_filter() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	ecs::Entity e1 = w.spawn();
+	ecs::Entity e2 = w.spawn();
+	ecs::Entity e3 = w.spawn();
+
+	Position pos = { .x = 1.0f, .y = 2.0f };
+	Velocity vel = { .dx = 0.5f, .dy = 0.5f };
+	Active act   = { .dummy = true };
+	Frozen froz  = { .dummy = true };
+
+	// Entity 1: Position + Velocity + Active
+	world::add{Position}(&w, e1, pos);
+	world::add{Velocity}(&w, e1, vel);
+	world::add{Active}(&w, e1, act);
+
+	// Entity 2: Position + Velocity (missing Active)
+	world::add{Position}(&w, e2, pos);
+	world::add{Velocity}(&w, e2, vel);
+
+	// Entity 3: Position + Velocity + Active + Frozen (should be excluded by Without{Frozen})
+	world::add{Position}(&w, e3, pos);
+	world::add{Velocity}(&w, e3, vel);
+	world::add{Active}(&w, e3, act);
+	world::add{Frozen}(&w, e3, froz);
+
+	var iter @safeinfer = w.query(Position, Velocity, ecs::With{Active}, ecs::Without{Frozen});
+
+	uint count = 0;
+	for (var res @safeinfer = iter.next(); res != null; res = iter.next())
+	{
+		assert(res.entity.id == e1.id);
+		assert(res.p1.x == 1.0f);
+		assert(res.p2.dx == 0.5f);
+		count++;
+	}
+	assert(count == 1);
+}
+
+struct TestEvent
+{
+	int val;
+}
+
+fn void message_writer_system_test(
+	ecs::MessageWriter{TestEvent} writer
+) {
+	TestEvent ev1 = { .val = 100 };
+	TestEvent ev2 = { .val = 200 };
+	writer.send(ev1);
+	writer.send(ev2);
+}
+
+int last_event_val = 0;
+
+fn void message_reader_system_test(
+	ecs::MessageReader{TestEvent} reader
+) {
+	for (var ev @safeinfer = reader.read(); ev != null; ev = reader.read())
+	{
+		last_event_val = ev.val;
+	}
+}
+
+fn void test_world_messages() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	last_event_val = 0;
+
+	w.run_systems(&message_writer_system_test, &message_reader_system_test);
+
+	assert(last_event_val == 200);
+}
+
+fn void event_observer_system_test(
+	ecs::On{TestEvent} trigger,
+	ecs::MessageReader{TestEvent} reader,
+	ecs::ResMut{GameConfig}* config
+) {
+	for (var ev @safeinfer = reader.read(); ev != null; ev = reader.read())
+	{
+		config.speed = (float)ev.val;
+	}
+}
+
+fn void test_world_observers() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	GameConfig config = { .speed = 5.0f };
+	w.add_resource(config);
+
+	w.run_systems(&event_observer_system_test);
+
+	GameConfig* game_config = (GameConfig*)w.get_resource(GameConfig::typeid);
+	assert(game_config.speed == 5.0f);
+
+	ecs::MessageWriter{TestEvent} writer;
+	ecs::@system_param_init(ecs::MessageWriter{TestEvent}, writer, &w);
+	TestEvent ev = { .val = 99 };
+	writer.send(ev);
+
+	w.run_systems(&event_observer_system_test);
+
+	game_config = (GameConfig*)w.get_resource(GameConfig::typeid);
+	assert(game_config.speed == 99.0f);
+}
+
+struct DestructibleResource
+{
+	int val;
+}
+
+int destructible_deinit_count = 0;
+
+fn void DestructibleResource.deinit(DestructibleResource* this, Allocator allocator)
+{
+	destructible_deinit_count++;
+}
+
+fn void test_resource_deinitialization() @test
+{
+	destructible_deinit_count = 0;
+	{
+		World w = world::new(mem);
+		defer w.deinit();
+
+		DestructibleResource res = { .val = 42 };
+		w.add_resource(res);
+
+		assert(w.has_resource(DestructibleResource::typeid));
+
+		w.remove_resource(DestructibleResource::typeid);
+		assert(!w.has_resource(DestructibleResource::typeid));
+		assert(destructible_deinit_count == 1);
+
+		w.add_resource(res);
+	}
+	assert(destructible_deinit_count == 2);
+}
+
+ecs::Entity commands_test_entity;
+
+fn void commands_spawner_system(ecs::Commands cmd)
+{
+	ecs::Entity e = cmd.spawn();
+	commands_test_entity = e;
+
+	Position pos = { .x = 100.0f, .y = 200.0f };
+	Velocity vel = { .dx = 1.5f, .dy = 2.5f };
+	cmd.@add(e, pos);
+	cmd.@add(e, vel);
+}
+
+bool exclusive_system_ran = false;
+
+fn void commands_exclusive_system(World* w)
+{
+	exclusive_system_ran = true;
+	assert(w.is_alive(commands_test_entity));
+	assert(world::has{Position}(w, commands_test_entity));
+	assert(world::has{Velocity}(w, commands_test_entity));
+	
+	Position* pos = world::get{Position}(w, commands_test_entity);
+	assert(pos != null);
+	assert(pos.x == 100.0f);
+	assert(pos.y == 200.0f);
+
+	Velocity* vel = world::get{Velocity}(w, commands_test_entity);
+	assert(vel != null);
+	assert(vel.dx == 1.5f);
+	assert(vel.dy == 2.5f);
+
+	pos.x = 150.0f;
+}
+
+fn void commands_despawner_system(ecs::Commands cmd)
+{
+	cmd.@despawn(commands_test_entity);
+}
+
+fn void test_world_commands() @test
+{
+	World w = world::new(mem);
+	defer w.deinit();
+
+	exclusive_system_ran = false;
+	commands_test_entity = {};
+
+	w.run_systems(&commands_spawner_system, &commands_exclusive_system, &commands_despawner_system);
+
+	assert(exclusive_system_ran);
+	assert(!w.is_alive(commands_test_entity));
+}
+
+
+World bench_w;
+bool bench_w_init = false;
+
+fn World setup_bench_w()
+{
+	World w = world::new(mem);
+
+	GameConfig config = { .speed = 2.0f };
+	w.add_resource(GameConfig::typeid, &config);
+
+	Position pos = { .x = 1.0f, .y = 2.0f };
+	Velocity vel = { .dx = 0.5f, .dy = 0.5f };
+	Active act   = { .dummy = true };
+	Frozen froz  = { .dummy = true };
+
+	for (int i = 0; i < 100_000 / 4; i++)
+	{
+		// Archetype 1: Position, Velocity
+		ecs::Entity e1 = w.spawn();
+		world::add{Position}(&w, e1, pos);
+		world::add{Velocity}(&w, e1, vel);
+
+		// Archetype 2: Position, Velocity, Active (matched)
+		ecs::Entity e2 = w.spawn();
+		world::add{Position}(&w, e2, pos);
+		world::add{Velocity}(&w, e2, vel);
+		world::add{Active}(&w, e2, act);
+
+		// Archetype 3: Position, Velocity, Active, Frozen (excluded)
+		ecs::Entity e3 = w.spawn();
+		world::add{Position}(&w, e3, pos);
+		world::add{Velocity}(&w, e3, vel);
+		world::add{Active}(&w, e3, act);
+		world::add{Frozen}(&w, e3, froz);
+
+		// Archetype 4: Position only
+		ecs::Entity e4 = w.spawn();
+		world::add{Position}(&w, e4, pos);
+	}
+	std::io::printfn("Setup benchmark with %d entities", w.count());
+	return w;
+}
+
+fn void bench_world_query() @benchmark
+{
+	if (!bench_w_init) {
+		bench_w = setup_bench_w();
+		bench_w_init = true;
+	}
+
+	var iter @safeinfer = bench_w.query(Position, Velocity, ecs::With{Active}, ecs::Without{Frozen});
+	for (var res @safeinfer = iter.next(); res != null; res = iter.next())
+	{
+		res.p1.x += res.p2.dx;
+		res.p1.y += res.p2.dy;
+	}
+}
+
+World spawn_bench_w;
+bool spawn_bench_w_init = false;
+
+fn void bench_spawn_add_components() @benchmark
+{
+	if (!spawn_bench_w_init)
+	{
+		spawn_bench_w = setup_bench_w();
+		spawn_bench_w_init = true;
+	}
+
+	ecs::Entity e = spawn_bench_w.spawn();
+	
+	Position pos = { .x = 1.0f, .y = 2.0f };
+	Velocity vel = { .dx = 0.5f, .dy = 0.5f };
+	Active act   = { .dummy = true };
+	Frozen froz  = { .dummy = true };
+	CompA ca     = { .val = 42 };
+	CompB cb     = { .val = 3.14f };
+	CompC cc     = { .val = 2.718 };
+
+	world::add{Position}(&spawn_bench_w, e, pos);
+	world::add{Velocity}(&spawn_bench_w, e, vel);
+	world::add{Active}(&spawn_bench_w, e, act);
+	world::add{Frozen}(&spawn_bench_w, e, froz);
+	world::add{CompA}(&spawn_bench_w, e, ca);
+	world::add{CompB}(&spawn_bench_w, e, cb);
+	world::add{CompC}(&spawn_bench_w, e, cc);
+}
+
+World systems_bench_w;
+bool systems_bench_w_init = false;
+
+fn void bench_3_systems_execution() @benchmark
+{
+	if (!systems_bench_w_init) {
+		systems_bench_w = setup_bench_w();
+		systems_bench_w_init = true;
+	}
+
+	systems_bench_w.run_systems(&movement_system_test, &collision_system_test, &collision_listener_test);
+}

@@ -1,0 +1,51 @@
+import ecs;
+import archetype;
+import std::core::mem;
+
+macro int factorial($n)
+{
+	$if $n == 0:
+		return 1;
+	$else
+		return $n * factorial($n - 1);
+	$endif
+}
+extern fn int printf(char* fmt, ...);
+
+fn void archetype_test() @test
+{
+	// Test Archetype and ComponentColumn index operator overloading
+	typeid[] types = { int::typeid, float::typeid };
+	archetype::Archetype arch = archetype::new(types, mem);
+	defer arch.deinit(mem);
+
+	ecs::Entity e1 = {.id = 123, .gen = 0};
+	uint row = arch.add_entity(mem, e1);
+
+	// Write component data via overloaded [] operator returning void*
+	int* int_ptr = archetype::get{int}(&arch,0,row);
+	*int_ptr = 42;
+
+	float* float_ptr = archetype::get{float}(&arch,1,row);
+	*float_ptr = 3.14f;
+
+	// Read and assert
+	int val1 = *archetype::get{int}(&arch,0,row);
+	float val2 = *archetype::get{float}(&arch,1,row);
+
+	assert(val1 == 42);
+	assert(val2 == 3.14f);
+}
+
+fn void archetype_add_remove_entity() @test
+{
+	typeid[] types = { int::typeid, float::typeid };
+	Archetype arch = archetype::new(types, mem);
+	defer arch.deinit(mem);
+
+	ecs::Entity e1 = { .id = 123, .gen = 0 };
+	uint row = arch.add_entity(mem, e1);
+    assert(arch.len == 1);
+	arch.remove_at(row);
+    assert(arch.len == 0);
+}
