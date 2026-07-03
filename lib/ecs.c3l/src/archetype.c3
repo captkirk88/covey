@@ -108,12 +108,18 @@ fn ecs::Entity Archetype.remove_at(Archetype* self, uint index) @export("archety
 		self.entities[index] = moved_entity;
 
 		// Swap component data across all columns
-		for (uint i = 0; i < self.component_types.len; i++)
+		void** columns = self.columns.ptr;
+		sz* sizes = self.component_sizes.ptr;
+		sz dst_row = (sz)index;
+		sz src_row = (sz)last_index;
+		uint column_count = self.component_sizes.len;
+
+		for (uint i = 0; i < column_count; i++)
 		{
-			void* col = self.columns[i];
-			sz size   = self.component_sizes[i];
-			char* dst = (char*)col + (index * size);
-			char* src = (char*)col + (last_index * size);
+			sz size = sizes[i];
+			char* col = (char*)columns[i];
+			char* dst = col + (dst_row * size);
+			char* src = col + (src_row * size);
 			mem::copy(dst, src, (usz)size);
 		}
 	}

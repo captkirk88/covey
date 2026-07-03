@@ -19,6 +19,7 @@ struct Velocity
 
 fn void test_world_basic() @test
 {
+	
 	World w = world::new(mem);
 	defer w.deinit();
 
@@ -589,3 +590,8 @@ fn void bench_3_systems_execution() @benchmark
 
 	systems_bench_w.run_systems(&movement_system_test, &collision_system_test, &collision_listener_test);
 }
+
+struct TestData {
+	int a;
+}
+

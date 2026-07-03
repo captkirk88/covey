@@ -26,6 +26,13 @@ struct MessageQueue @export("MessageQueue")
 	List{MessageRecord} records;
 }
 
+const uint ARCHETYPE_SIG_WORDS = 4;
+
+struct ArchetypeSignature @export("ArchetypeSignature")
+{
+	ulong[ARCHETYPE_SIG_WORDS] words;
+}
+
 enum CommandKind @export("CommandKind")
 {
 	SPAWN,
@@ -59,8 +66,13 @@ struct World @export("World")
 	Archetype*[] archetypes;
 	uint archetypes_len;
 	uint archetypes_cap;
+	ArchetypeSignature[] archetype_signatures;
 
 	Archetype* empty_archetype;
+
+	typeid[] signature_types;
+	uint signature_types_len;
+	uint signature_types_cap;
 
 	ResourceRecord[] resources;
 	uint resources_len;
@@ -123,7 +135,26 @@ fn void ensure_archetypes_capacity(World* self, usz new_cap) @private
 
 	self.archetypes = alloc::realloc_array(self.allocator, self.archetypes.ptr, Archetype*, (sz)new_cap);
 	self.archetypes = self.archetypes.ptr[0..self.archetypes_len];
+	self.archetype_signatures = alloc::realloc_array(self.allocator, self.archetype_signatures.ptr, ArchetypeSignature, (sz)new_cap);
+	self.archetype_signatures = self.archetype_signatures.ptr[0..self.archetypes_len];
 	self.archetypes_cap = (uint)new_cap;
+}
+
+fn void ensure_signature_types_capacity(World* self, usz new_cap) @private
+{
+	if (new_cap <= self.signature_types_cap) return;
+	if (new_cap < 8)
+	{
+		new_cap = 8;
+	}
+	else if (new_cap < (usz)self.signature_types_cap * 2)
+	{
+		new_cap = (usz)self.signature_types_cap * 2;
+	}
+
+	self.signature_types = alloc::realloc_array(self.allocator, self.signature_types.ptr, typeid, (sz)new_cap);
+	self.signature_types = self.signature_types.ptr[0..self.signature_types_len];
+	self.signature_types_cap = (uint)new_cap;
 }
 
 fn World new(Allocator allocator) @export("world_new")
@@ -139,7 +170,9 @@ fn World new(Allocator allocator) @export("world_new")
 	ensure_archetypes_capacity(&self, 1);
 	self.archetypes_len = 1;
 	self.archetypes = self.archetypes.ptr[0..1];
+	self.archetype_signatures = self.archetype_signatures.ptr[0..1];
 	self.archetypes[0] = self.empty_archetype;
+	self.archetype_signatures[0] = {};
 
 	self.commands_mutex.init()!!;
 	self.deferred_spawn_count = 0;
@@ -185,6 +218,14 @@ fn void World.deinit(World* self) @export("world_deinit")
 	if (self.archetypes.ptr != null)
 	{
 		alloc::free(self.allocator, self.archetypes.ptr);
+	}
+	if (self.archetype_signatures.ptr != null)
+	{
+		alloc::free(self.allocator, self.archetype_signatures.ptr);
+	}
+	if (self.signature_types.ptr != null)
+	{
+		alloc::free(self.allocator, self.signature_types.ptr);
 	}
 
 	// Free resources array and their allocations
@@ -293,46 +334,88 @@ fn void sort_types(typeid[] types) @private
 			j--;
 		}
 		types[j + 1] = key;
+	};
+}
+
+fn int find_component_signature_index(World* self, typeid type) @private
+{
+	for (uint i = 0; i < self.signature_types_len; i++)
+	{
+		if (self.signature_types[i] == type) return (int)i;
 	}
+	return -1;
+}
+
+fn uint get_or_register_component_signature_index(World* self, typeid type) @private
+{
+	int found = find_component_signature_index(self, type);
+	if (found >= 0) return (uint)found;
+
+	ensure_signature_types_capacity(self, (usz)self.signature_types_len + 1);
+	uint idx = self.signature_types_len;
+	self.signature_types_len++;
+	self.signature_types = self.signature_types.ptr[0..self.signature_types_len];
+	self.signature_types[idx] = type;
+	return idx;
+}
+
+fn ArchetypeSignature build_signature(World* self, typeid[] sorted_types) @private
+{
+	ArchetypeSignature sig = {};
+	for (uint i = 0; i < sorted_types.len; i++)
+	{
+		uint idx = get_or_register_component_signature_index(self, sorted_types[i]);
+		uint word = idx / 64;
+		if (word < ARCHETYPE_SIG_WORDS)
+		{
+			sig.words[word] |= (ulong)1 << (idx % 64);
+		}
+	}
+	return sig;
 }
 
 fn Archetype* get_or_create_archetype(World* self, typeid[] types) @private
 {
-	typeid[] sorted_types = alloc::alloc_array(self.allocator, typeid, types.len);
-	mem::copy(sorted_types.ptr, types.ptr, types.len * uptr::size);
-	sort_types(sorted_types);
-	defer alloc::free(self.allocator, sorted_types.ptr);
-
-	for (uint i = 0; i < self.archetypes_len; i++)
+	@pool()
 	{
-		Archetype* arch = self.archetypes[i];
-		if (arch.component_types.len != sorted_types.len) continue;
+		typeid[] sorted_types = mem::temp_array(typeid, types.len);
+		mem::copy(sorted_types.ptr, types.ptr, types.len * uptr::size);
+		sort_types(sorted_types);
 
-		bool match = true;
-		for (uint j = 0; j < sorted_types.len; j++)
+		for (uint i = 0; i < self.archetypes_len; i++)
 		{
-			if (arch.component_types[j] != sorted_types[j])
+			Archetype* arch = self.archetypes[i];
+			if (arch.component_types.len != sorted_types.len) continue;
+
+			bool match = true;
+			for (uint j = 0; j < sorted_types.len; j++)
 			{
-				match = false;
-				break;
+				if (arch.component_types[j] != sorted_types[j])
+				{
+					match = false;
+					break;
+				}
+			}
+
+			if (match)
+			{
+				return arch;
 			}
 		}
 
-		if (match)
-		{
-			return arch;
-		}
-	}
+		Archetype* new_arch = alloc::new(self.allocator, Archetype);
+		*new_arch = archetype::new(sorted_types, self.allocator);
+		ArchetypeSignature sig = build_signature(self, sorted_types);
 
-	Archetype* new_arch = alloc::new(self.allocator, Archetype);
-	*new_arch = archetype::new(sorted_types, self.allocator);
+		ensure_archetypes_capacity(self, (usz)self.archetypes_len + 1);
+		self.archetypes_len++;
+		self.archetypes = self.archetypes.ptr[0..self.archetypes_len];
+		self.archetype_signatures = self.archetype_signatures.ptr[0..self.archetypes_len];
+		self.archetypes[self.archetypes_len - 1] = new_arch;
+		self.archetype_signatures[self.archetypes_len - 1] = sig;
 
-	ensure_archetypes_capacity(self, (usz)self.archetypes_len + 1);
-	self.archetypes_len++;
-	self.archetypes = self.archetypes.ptr[0..self.archetypes_len];
-	self.archetypes[self.archetypes_len - 1] = new_arch;
-
-	return new_arch;
+		return new_arch;
+	};
 }
 
 fn bool World.has_component(World* self, ecs::Entity entity, typeid type) @export("world_has_component")
@@ -397,30 +480,33 @@ fn void World.add_component(World* self, ecs::Entity entity, typeid type, void* 
 
 	Archetype* new_arch = get_or_create_archetype(self, new_types);
 	uint new_row        = new_arch.add_entity(self.allocator, entity);
+	int new_col_idx     = new_arch.find_column(type);
+	assert(new_col_idx >= 0);
 
+	uint mapped_new_col = 0;
 	for (uint i = 0; i < old_arch.component_types.len; i++)
 	{
-		typeid t        = old_arch.component_types[i];
-		int old_col_idx = (int)i;
-		int new_col_idx = new_arch.find_column(t);
-		assert(new_col_idx >= 0);
+		if ((int)mapped_new_col == new_col_idx)
+		{
+			mapped_new_col++;
+		}
 
-		ComponentColumn old_col = old_arch.get_column((uint)old_col_idx);
-		ComponentColumn new_col = new_arch.get_column((uint)new_col_idx);
-
-		mem::copy(new_col[new_row], old_col[old_row], (usz)t.size);
+		sz size = old_arch.component_sizes[i];
+		char* old_ptr = (char*)old_arch.columns[i] + ((sz)old_row * size);
+		char* new_ptr = (char*)new_arch.columns[mapped_new_col] + ((sz)new_row * size);
+		mem::copy(new_ptr, old_ptr, (usz)size);
+		mapped_new_col++;
 	}
 
-	int new_col_idx = new_arch.find_column(type);
-	assert(new_col_idx >= 0);
-	ComponentColumn new_col = new_arch.get_column((uint)new_col_idx);
+	sz new_size = type.size;
+	char* new_col_ptr = (char*)new_arch.columns[(uint)new_col_idx] + ((sz)new_row * new_size);
 	if (data != null)
 	{
-		mem::copy(new_col[new_row], data, (usz)type.size);
+		mem::copy(new_col_ptr, data, (usz)new_size);
 	}
 	else
 	{
-		mem::set(new_col[new_row], 0, (usz)type.size);
+		mem::set(new_col_ptr, 0, (usz)new_size);
 	}
 
 	ecs::Entity moved_entity = old_arch.remove_at(old_row);
@@ -458,18 +544,16 @@ fn void World.remove_component(World* self, ecs::Entity entity, typeid type) @ex
 	Archetype* new_arch = get_or_create_archetype(self, new_types);
 	uint new_row        = new_arch.add_entity(self.allocator, entity);
 
+	uint mapped_new_col = 0;
 	for (uint i = 0; i < old_arch.component_types.len; i++)
 	{
 		if (i == (uint)col) continue;
-		typeid t        = old_arch.component_types[i];
-		int old_col_idx = (int)i;
-		int new_col_idx = new_arch.find_column(t);
-		assert(new_col_idx >= 0);
 
-		ComponentColumn old_col = old_arch.get_column((uint)old_col_idx);
-		ComponentColumn new_col = new_arch.get_column((uint)new_col_idx);
-
-		mem::copy(new_col[new_row], old_col[old_row], (usz)t.size);
+		sz size = old_arch.component_sizes[i];
+		char* old_ptr = (char*)old_arch.columns[i] + ((sz)old_row * size);
+		char* new_ptr = (char*)new_arch.columns[mapped_new_col] + ((sz)new_row * size);
+		mem::copy(new_ptr, old_ptr, (usz)size);
+		mapped_new_col++;
 	}
 
 	ecs::Entity moved_entity = old_arch.remove_at(old_row);
@@ -527,10 +611,25 @@ struct QueryIterBase @export("QueryIterBase")
 	uint row_idx;
 	uint cached_archetype_idx;
 	int[8] component_columns;
+	ComponentColumn[8] cached_columns;
+	ulong[ARCHETYPE_SIG_WORDS] include_mask;
+	ulong[ARCHETYPE_SIG_WORDS] exclude_mask;
+	bool use_signature_cache;
+	bool impossible_match;
 	typeid[8] include_types;
 	ushort include_len;
 	typeid[8] exclude_types;
 	ushort exclude_len;
+}
+
+fn bool signature_matches_query(ArchetypeSignature* sig, QueryIterBase* query) @private
+{
+	for (uint i = 0; i < ARCHETYPE_SIG_WORDS; i++)
+	{
+		if ((sig.words[i] & query.include_mask[i]) != query.include_mask[i]) return false;
+		if ((sig.words[i] & query.exclude_mask[i]) != 0) return false;
+	}
+	return true;
 }
 
 struct QueryIter <TypeA, TypeB, TypeC, TypeD, TypeE, TypeF, TypeG, TypeH>
@@ -556,23 +655,38 @@ fn bool query_iter_next(QueryIterBase* self) @private
 		// Match checks only need to happen when we first enter an archetype.
 		if (self.row_idx == 0)
 		{
-			bool match = true;
-			for (ushort i = 0; i < self.include_len; i++)
+			bool match;
+			if (self.use_signature_cache)
 			{
-				if (arch.find_column(self.include_types[i]) < 0)
+				if (self.impossible_match)
 				{
 					match = false;
-					break;
+				}
+				else
+				{
+					match = signature_matches_query(&self.world.archetype_signatures[self.archetype_idx], self);
 				}
 			}
-			if (match)
+			else
 			{
-				for (ushort i = 0; i < self.exclude_len; i++)
+				match = true;
+				for (ushort i = 0; i < self.include_len; i++)
 				{
-					if (arch.find_column(self.exclude_types[i]) >= 0)
+					if (arch.find_column(self.include_types[i]) < 0)
 					{
 						match = false;
 						break;
+					}
+				}
+				if (match)
+				{
+					for (ushort i = 0; i < self.exclude_len; i++)
+					{
+						if (arch.find_column(self.exclude_types[i]) >= 0)
+						{
+							match = false;
+							break;
+						}
 					}
 				}
 			}
@@ -731,8 +845,53 @@ macro World.query(World* self, ...)
 		$endif
 	$endfor
 	iter.cached_archetype_idx = 0xffff_ffff;
+	iter.use_signature_cache = true;
+	iter.impossible_match = false;
 	iter.include_len = (ushort)$inc_idx;
 	iter.exclude_len = (ushort)$exc_idx;
+
+	for (uint i = 0; i < ARCHETYPE_SIG_WORDS; i++)
+	{
+		iter.include_mask[i] = 0;
+		iter.exclude_mask[i] = 0;
+	}
+
+	for (ushort i = 0; i < iter.include_len; i++)
+	{
+		int sig_idx = find_component_signature_index(self, iter.include_types[i]);
+		if (sig_idx < 0)
+		{
+			iter.impossible_match = true;
+			break;
+		}
+
+		uint word = (uint)sig_idx / 64;
+		if (word >= ARCHETYPE_SIG_WORDS)
+		{
+			iter.use_signature_cache = false;
+			break;
+		}
+
+		iter.include_mask[word] |= (ulong)1 << ((uint)sig_idx % 64);
+	}
+
+	if (iter.use_signature_cache && !iter.impossible_match)
+	{
+		for (ushort i = 0; i < iter.exclude_len; i++)
+		{
+			int sig_idx = find_component_signature_index(self, iter.exclude_types[i]);
+			if (sig_idx < 0) continue;
+
+			uint word = (uint)sig_idx / 64;
+			if (word >= ARCHETYPE_SIG_WORDS)
+			{
+				iter.use_signature_cache = false;
+				break;
+			}
+
+			iter.exclude_mask[word] |= (ulong)1 << ((uint)sig_idx % 64);
+		}
+	}
 
 	return iter;
 }
@@ -755,6 +914,7 @@ macro QueryIter.next(QueryIter* self)
 					$else
 						self.base.component_columns[$col_slot] = arch.find_column(ecs::type_to_typeid($Typeof(*(($Typefrom($m.type))1))));
 						assert(self.base.component_columns[$col_slot] >= 0);
+						self.base.cached_columns[$col_slot] = arch.get_column((uint)self.base.component_columns[$col_slot]);
 						$col_slot = $col_slot + 1;
 					$endif
 				$endif
@@ -778,9 +938,8 @@ macro QueryIter.next(QueryIter* self)
 							self.$member_name = &arch.entities[row];
 						}
 					$else
-						int col_idx = self.base.component_columns[$col_read_slot];
+						ComponentColumn col = self.base.cached_columns[$col_read_slot];
 						$col_read_slot = $col_read_slot + 1;
-						ComponentColumn col = arch.get_column((uint)col_idx);
 						String $member_name = $m.name;
 						self.$member_name = ecs::cast_ptr($Typeof(*(($Typefrom($m.type))1)), col[row]);
 					$endif

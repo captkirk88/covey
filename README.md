@@ -4,9 +4,8 @@ Covey is a C3 project that implements a simple ECS (Entity Component System) fra
 
 Covey is a work in progress and is not yet feature complete but can be used to create simple games and simulations. Expect changes to the API as it evolves.
 
-## Why C3?
-
-It is closer to 1.0 than Zig. Has actual interfaces. Allows for more complex data structures and is more familiar to most developers coming from C. It also has a more mature ecosystem and better tooling support (you don't need a build.zig so you can use mise or make). It was easier to write a Bevy inspired ECS in C3 than Zig. Getting SystemParams and systems to work right is because of C3 macros. You could argue that Zig's comptime is more powerful than C3's macros, but comptime in Zig becomes more complex and harder to read when you start doing more advanced things. C3's macros are simpler and easier to read, but they are not as powerful as Zig's comptime.
+> [!NOTE]
+> C3 does not have a good std fully implemented yet and some of the c3c commands are not implemented yet.  My advice, wait for 1.0 before using it in a project.
 
 ## Docs
 
@@ -14,9 +13,10 @@ Generate docs with `c3c docgen --emit-stdlib=no`.
 
 ## Benchmarks
 
-Run benchmarks with `c3c test --benchmarking -O5`. Adjust optimization preference as needed.
+Run benchmarks with `c3c test --benchmarking -O5`.
 
-Results on my system are not representative of all systems. Your results may vary.
+> [!NOTE]
+> Results on my system are not representative of all systems. Your results may vary.
 
 ```
 test_world::bench_world_query ...........  132.59us avg,  12.35us sd,   423509.81 CPU clocks,   10000 iters in    1.33s
