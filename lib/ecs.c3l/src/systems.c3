@@ -12,7 +12,7 @@ macro void @run_system_helper(World* self, $SysType, #system) @private
 			$if $first_name.len >= 3 && $first_name[0..2] == "On{":
 				{
 					bool $has_event = false;
-					for (uint i = 0; i < self.message_queue.records_len; i++)
+					for (sz i = 0; i < self.message_queue.records.len(); i++)
 					{
 						if (self.message_queue.records[i].type == $first_dummy.type_a())
 						{

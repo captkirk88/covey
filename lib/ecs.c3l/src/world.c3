@@ -3,6 +3,7 @@ module world;
 import ecs;
 import archetype;
 import std::core::mem;
+import std::collections::list;
 import std::thread;
 
 struct EntityRecord @export("EntityRecord")
@@ -22,9 +23,7 @@ struct MessageRecord @export("MessageRecord")
 
 struct MessageQueue @export("MessageQueue")
 {
-	MessageRecord[] records;
-	uint records_len;
-	uint records_cap;
+	List{MessageRecord} records;
 }
 
 enum CommandKind @export("CommandKind")
@@ -144,6 +143,7 @@ fn World new(Allocator allocator) @export("world_new")
 
 	self.commands_mutex.init()!!;
 	self.deferred_spawn_count = 0;
+	self.message_queue.records.init(allocator, 16);
 
 	return self;
 }
@@ -191,14 +191,11 @@ fn void World.deinit(World* self) @export("world_deinit")
 	self.clear_resources();
 
 	// Free message queue and records
-	for (uint i = 0; i < self.message_queue.records_len; i++)
+	for (sz i = 0; i < self.message_queue.records.len(); i++)
 	{
 		alloc::free(self.allocator, self.message_queue.records[i].data);
 	}
-	if (self.message_queue.records.ptr != null)
-	{
-		alloc::free(self.allocator, self.message_queue.records.ptr);
-	}
+	self.message_queue.records.free();
 
 	*self = { };
 }
@@ -209,25 +206,16 @@ fn void World.send_message(World* self, typeid type, void* data, uint size) @exp
 {
 	void* copy = alloc::malloc(self.allocator, size);
 	mem::copy(copy, data, (usz)size);
-	
-	if (self.message_queue.records_len >= self.message_queue.records_cap)
-	{
-		uint new_cap = self.message_queue.records_cap == 0 ? 16 : self.message_queue.records_cap * 2;
-		self.message_queue.records = alloc::realloc_array(self.allocator, self.message_queue.records.ptr, MessageRecord, (sz)new_cap);
-		self.message_queue.records = self.message_queue.records.ptr[0..self.message_queue.records_len];
-		self.message_queue.records_cap = new_cap;
-	}
-	self.message_queue.records[self.message_queue.records_len] = { type, copy, size };
-	self.message_queue.records_len++;
+	self.message_queue.records.push({ type, copy, size });
 }
 
 fn void World.clear_messages(World* self) @export("world_clear_messages")
 {
-	for (uint i = 0; i < self.message_queue.records_len; i++)
+	for (sz i = 0; i < self.message_queue.records.len(); i++)
 	{
 		alloc::free(self.allocator, self.message_queue.records[i].data);
 	}
-	self.message_queue.records_len = 0;
+	self.message_queue.records.clear();
 }
 
 fn ecs::Entity World.spawn(World* self) @export("world_spawn")
@@ -537,6 +525,8 @@ struct QueryIterBase @export("QueryIterBase")
 	World* world;
 	uint archetype_idx;
 	uint row_idx;
+	uint cached_archetype_idx;
+	int[8] component_columns;
 	typeid[8] include_types;
 	ushort include_len;
 	typeid[8] exclude_types;
@@ -562,34 +552,36 @@ fn bool query_iter_next(QueryIterBase* self) @private
 	while (self.archetype_idx < self.world.archetypes_len)
 	{
 		Archetype* arch = self.world.archetypes[self.archetype_idx];
-		
-		// Check if the current archetype matches the criteria
-		bool match = true;
-		for (ushort i = 0; i < self.include_len; i++)
+
+		// Match checks only need to happen when we first enter an archetype.
+		if (self.row_idx == 0)
 		{
-			if (arch.find_column(self.include_types[i]) < 0)
+			bool match = true;
+			for (ushort i = 0; i < self.include_len; i++)
 			{
-				match = false;
-				break;
-			}
-		}
-		if (match)
-		{
-			for (ushort i = 0; i < self.exclude_len; i++)
-			{
-				if (arch.find_column(self.exclude_types[i]) >= 0)
+				if (arch.find_column(self.include_types[i]) < 0)
 				{
 					match = false;
 					break;
 				}
 			}
-		}
-		
-		if (!match)
-		{
-			self.archetype_idx++;
-			self.row_idx = 0;
-			continue;
+			if (match)
+			{
+				for (ushort i = 0; i < self.exclude_len; i++)
+				{
+					if (arch.find_column(self.exclude_types[i]) >= 0)
+					{
+						match = false;
+						break;
+					}
+				}
+			}
+
+			if (!match)
+			{
+				self.archetype_idx++;
+				continue;
+			}
 		}
 		
 		// If we are at the end of this archetype, move to next
@@ -738,6 +730,7 @@ macro World.query(World* self, ...)
 			$endif
 		$endif
 	$endfor
+	iter.cached_archetype_idx = 0xffff_ffff;
 	iter.include_len = (ushort)$inc_idx;
 	iter.exclude_len = (ushort)$exc_idx;
 
@@ -750,8 +743,29 @@ macro QueryIter.next(QueryIter* self)
 	
 	Archetype* arch = self.world.archetypes[self.archetype_idx];
 	uint row = self.row_idx;
+
+	if (self.base.cached_archetype_idx != self.base.archetype_idx)
+	{
+		int $col_slot = 0;
+		$foreach $m : $Typeof(*self)::members:
+			$if $m.name == "base" || $m.name == "entity":
+			$else
+				$if $m.type != void*::typeid:
+					$if $m.type == ecs::Entity*::typeid:
+					$else
+						self.base.component_columns[$col_slot] = arch.find_column(ecs::type_to_typeid($Typeof(*(($Typefrom($m.type))1))));
+						assert(self.base.component_columns[$col_slot] >= 0);
+						$col_slot = $col_slot + 1;
+					$endif
+				$endif
+			$endif
+		$endforeach
+
+		self.base.cached_archetype_idx = self.base.archetype_idx;
+	}
 	
 	self.entity = arch.entities[row];
+	int $col_read_slot = 0;
 	
 	$foreach $m : $Typeof(*self)::members:
 		$if $m.name == "base" || $m.name == "entity":
@@ -764,8 +778,8 @@ macro QueryIter.next(QueryIter* self)
 							self.$member_name = &arch.entities[row];
 						}
 					$else
-						int col_idx = arch.find_column(ecs::type_to_typeid($Typeof(*(($Typefrom($m.type))1))));
-						assert(col_idx >= 0);
+						int col_idx = self.base.component_columns[$col_read_slot];
+						$col_read_slot = $col_read_slot + 1;
 						ComponentColumn col = arch.get_column((uint)col_idx);
 						String $member_name = $m.name;
 						self.$member_name = ecs::cast_ptr($Typeof(*(($Typefrom($m.type))1)), col[row]);

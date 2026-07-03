@@ -64,7 +64,7 @@ macro void MessageWriter.send(MessageWriter* self, MessageType msg)
 struct MessageReader (SystemParam) <MessageType>
 {
 	World* world;
-	uint index;
+	sz index;
 }
 
 macro typeid MessageReader.type_a(MessageReader* self) { return MessageType::typeid; }
@@ -77,7 +77,7 @@ macro void MessageReader.init_system_param(MessageReader* this, World* world)
 
 macro MessageType* MessageReader.read(MessageReader* self)
 {
-	while (self.index < self.world.message_queue.records_len)
+	while (self.index < self.world.message_queue.records.len())
 	{
 		if (self.world.message_queue.records[self.index].type == MessageType::typeid)
 		{
